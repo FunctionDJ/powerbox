@@ -1,0 +1,12 @@
+{
+	"typeCheckingMode": "strict",
+	"venvPath": ".",
+	"venv": ".venv",
+	"extraPaths": [
+		"."
+	],
+	"include": [
+		"main.py",
+		"powerbox"
+	]
+}

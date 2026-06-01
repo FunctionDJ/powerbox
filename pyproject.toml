@@ -1,0 +1,24 @@
+[project]
+name = "powerbox"
+version = "0.1.0"
+description = "Rekordbox exporter to take your library on-the-go."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+	"pyrekordbox>=0.4.4",
+	"ruff>=0.15.15",
+	"sqlcipher3-binary>=0.6.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "TC"]
+ignore = ["W191"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "tab"
+line-ending = "lf"
