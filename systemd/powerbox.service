@@ -1,0 +1,13 @@
+[Unit]
+ConditionPathExists=/home/foo/syncs
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/foo/powerbox
+ExecStart=/home/foo/.local/bin/uv run main.py
+User=foo
+Group=foo
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/foo/syncs
+PrivateTmp=yes
