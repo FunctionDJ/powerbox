@@ -9,12 +9,39 @@ from typing import TYPE_CHECKING
 
 from .config import load_config
 from .discovery import discover_playlists
-from .manifest import get_track_signature, load_manifest
-from .models import MANIFEST_NAME, ManifestData, PlaylistManifestEntry, TrackManifestEntry
-from .output_ops import remove_stale_managed_files, transcode_track, write_playlist_file
+from .manifest import get_track_signature
+from .models import (
+	MANIFEST_NAME,
+	MUSIC_SUBDIR,
+	PLAYLISTS_SUBDIR,
+	ManifestData,
+	PlaylistManifestEntry,
+	TrackManifestEntry,
+)
+from .output_ops import (
+	copy_track_file,
+	detect_audio_codec,
+	remove_stale_managed_files,
+	set_file_mtime_from_date,
+	transcode_track,
+	write_playlist_file,
+)
 
 if TYPE_CHECKING:
 	from pathlib import Path
+
+
+def _list_existing_files_under_subdir(export_root: Path, subdir: str) -> set[str]:
+	base = export_root / subdir
+	if not base.exists():
+		return set()
+
+	results: set[str] = set()
+	for path in base.rglob("*"):
+		if not path.is_file():
+			continue
+		results.add(path.relative_to(export_root).as_posix())
+	return results
 
 
 def run_export(dry_run: bool) -> None:
@@ -28,8 +55,6 @@ def run_export(dry_run: bool) -> None:
 	)
 
 	manifest_path = config.export_root / MANIFEST_NAME
-	previous_manifest = load_manifest(manifest_path)
-	previous_managed = previous_manifest.get("managed_files", {"audio": [], "playlists": []})
 
 	playlist_plans, skipped_smart = discover_playlists(config)
 	logging.info("Discovered playlists: %d", len(playlist_plans))
@@ -38,17 +63,12 @@ def run_export(dry_run: bool) -> None:
 	managed_audio: set[str] = set()
 
 	unique_tracks: dict[Path, Path] = {}
+	track_stock_dates: dict[Path, str] = {}
 	output_owners: dict[Path, Path] = {}
 	for playlist in playlist_plans:
 		for track in playlist.tracks:
-			owner = output_owners.get(track.output_relpath)
-			if owner is not None and owner != track.source_path:
-				raise RuntimeError(
-					f"Output path conflict while processing: {track.output_relpath} "
-					f"for {owner} and {track.source_path}"
-				)
-			output_owners[track.output_relpath] = track.source_path
 			unique_tracks.setdefault(track.source_path, track.output_relpath)
+			track_stock_dates.setdefault(track.source_path, track.stock_date)
 
 	logging.debug("Unique source tracks to process: %d", len(unique_tracks))
 
@@ -56,10 +76,17 @@ def run_export(dry_run: bool) -> None:
 	skipped_unchanged_count = 0
 	skipped_missing_source_count = 0
 
-	# Pre-pass: determine which tracks need encoding and populate the manifest.
+	# Pre-pass: determine which tracks need work and populate the manifest.
 	# Tracks that are missing or unchanged are handled immediately; encode tasks
 	# are collected for parallel execution below.
-	encode_tasks: list[tuple[Path, Path]] = []  # (source_path, output_path)
+	encode_tasks: list[tuple[Path, Path, str]] = []  # (source_path, output_path, stock_date)
+	copy_tasks: list[tuple[Path, Path, str]] = []  # (source_path, output_path, stock_date)
+	source_codecs_to_skip = set(config.source_codecs_to_skip_reencode)
+	if source_codecs_to_skip:
+		logging.info(
+			"Configured to skip re-encode for source codec(s): %s",
+			", ".join(sorted(source_codecs_to_skip)),
+		)
 
 	for source_path, output_relpath in sorted(unique_tracks.items(), key=lambda item: str(item[0])):
 		if not source_path.exists():
@@ -67,8 +94,22 @@ def run_export(dry_run: bool) -> None:
 			skipped_missing_source_count += 1
 			continue
 
+		source_codec = detect_audio_codec(source_path)
+		effective_output_relpath = output_relpath
+		if source_codec is not None and source_codec in source_codecs_to_skip:
+			effective_output_relpath = output_relpath.with_suffix(source_path.suffix.lower())
+
+		owner = output_owners.get(effective_output_relpath)
+		if owner is not None and owner != source_path:
+			raise RuntimeError(
+				f"Output path conflict while processing: {effective_output_relpath} "
+				f"for {owner} and {source_path}"
+			)
+		output_owners[effective_output_relpath] = source_path
+
 		signature = get_track_signature(source_path)
-		output_path = config.export_root / output_relpath
+		output_path = config.export_root / effective_output_relpath
+		stock_date = track_stock_dates.get(source_path, "")
 
 		# If the destination file is already present, treat it as completed.
 		needs_encode = not output_path.exists()
@@ -76,41 +117,86 @@ def run_export(dry_run: bool) -> None:
 		current_track_manifest[str(source_path)] = {
 			**signature,
 			"encoder_fingerprint": config.encoder.fingerprint,
-			"output_path": str(output_relpath),
+			"output_path": str(effective_output_relpath),
 		}
-		managed_audio.add(str(output_relpath))
+		managed_audio.add(str(effective_output_relpath))
 
 		if needs_encode:
-			encode_tasks.append((source_path, output_path))
+			if source_codec is not None and source_codec in source_codecs_to_skip:
+				copy_tasks.append((source_path, output_path, stock_date))
+			else:
+				encode_tasks.append((source_path, output_path, stock_date))
 		else:
-			logging.debug("Destination exists, skipping encode: %s", output_path)
+			logging.debug("Destination exists, skipping write: %s", output_path)
 			skipped_unchanged_count += 1
+			if not dry_run:
+				set_file_mtime_from_date(output_path, stock_date)
 
 	# Parallel encoding pass.
 	workers = os.cpu_count() or 1
-	logging.info("Encoding %d track(s) with %d parallel worker(s)", len(encode_tasks), workers)
+	logging.info(
+		"Writing tracks with %d parallel worker(s): encode=%d copy_without_reencode=%d",
+		workers,
+		len(encode_tasks),
+		len(copy_tasks),
+	)
 
-	if encode_tasks:
-		total = len(encode_tasks)
+	work_tasks: list[tuple[str, Path, Path, str]] = []
+	for src, out, stock_date in encode_tasks:
+		work_tasks.append(("encode", src, out, stock_date))
+	for src, out, stock_date in copy_tasks:
+		work_tasks.append(("copy", src, out, stock_date))
+
+	if work_tasks:
+		total = len(work_tasks)
 		width = len(str(total))
 		done = 0
 		errors: list[str] = []
 		with ThreadPoolExecutor(max_workers=workers) as executor:
-			future_to_src: dict[Future[None], Path] = {
-				executor.submit(transcode_track, config, src, out, dry_run): src
-				for src, out in encode_tasks
-			}
-			for future in as_completed(future_to_src):
-				src = future_to_src[future]
+			future_to_task: dict[Future[None], tuple[str, Path, Path, str]] = {}
+			for mode, src, out, stock_date in work_tasks:
+				if mode == "copy":
+					future = executor.submit(copy_track_file, src, out, dry_run)
+				else:
+					future = executor.submit(transcode_track, config, src, out, dry_run)
+				future_to_task[future] = (mode, src, out, stock_date)
+			for future in as_completed(future_to_task):
+				mode, src, out, stock_date = future_to_task[future]
 				done += 1
 				pct = done * 100 // total
 				try:
 					future.result()
 					encoded_count += 1
-					logging.debug("[%*d/%d (%3d%%)] Encoded: %s", width, done, total, pct, src.name)
+					if not dry_run:
+						set_file_mtime_from_date(out, stock_date)
+					if mode == "copy":
+						logging.debug(
+							"[%*d/%d (%3d%%)] Copied without re-encode: %s",
+							width,
+							done,
+							total,
+							pct,
+							src.name,
+						)
+					else:
+						logging.debug(
+							"[%*d/%d (%3d%%)] Encoded: %s",
+							width,
+							done,
+							total,
+							pct,
+							src.name,
+						)
 				except Exception as exc:
 					logging.error(
-						"[%*d/%d (%3d%%)] FAILED: %s: %s", width, done, total, pct, src, exc
+						"[%*d/%d (%3d%%)] FAILED (%s): %s: %s",
+						width,
+						done,
+						total,
+						pct,
+						mode,
+						src,
+						exc,
 					)
 					errors.append(f"{src}: {exc}")
 		if errors:
@@ -145,11 +231,11 @@ def run_export(dry_run: bool) -> None:
 		}
 		managed_playlists.add(str(playlist.output_relpath))
 
-	previous_audio = set(previous_managed.get("audio", []))
-	previous_playlists = set(previous_managed.get("playlists", []))
+	existing_audio = _list_existing_files_under_subdir(config.export_root, MUSIC_SUBDIR)
+	existing_playlists = _list_existing_files_under_subdir(config.export_root, PLAYLISTS_SUBDIR)
 
-	stale_audio = previous_audio - managed_audio
-	stale_playlists = previous_playlists - managed_playlists
+	stale_audio = existing_audio - managed_audio
+	stale_playlists = existing_playlists - managed_playlists
 
 	logging.info(
 		"Stale files to remove: audio=%d playlists=%d",

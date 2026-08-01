@@ -19,6 +19,28 @@ def _is_deleted_row(row: object) -> bool:
 	return bool(getattr(row, "rb_local_deleted", 0))
 
 
+def _clean_metadata_text(value: object) -> str | None:
+	if isinstance(value, str):
+		cleaned = value.strip()
+		return cleaned or None
+
+	name_value = getattr(value, "Name", None)
+	if isinstance(name_value, str):
+		cleaned = name_value.strip()
+		return cleaned or None
+
+	return None
+
+
+def _get_content_artist_and_title(content: DjmdContent) -> tuple[str | None, str | None]:
+	artist = _clean_metadata_text(getattr(content, "ArtistName", None))
+	if artist is None:
+		artist = _clean_metadata_text(getattr(content, "Artist", None))
+
+	title = _clean_metadata_text(getattr(content, "Title", None))
+	return artist, title
+
+
 def discover_playlists(config: AppConfig) -> tuple[list[PlaylistPlan], set[str]]:
 	playlist_plans: list[PlaylistPlan] = []
 	skipped_smart: set[str] = set()
@@ -104,7 +126,13 @@ def discover_playlists(config: AppConfig) -> tuple[list[PlaylistPlan], set[str]]
 				)
 				output_relpath = track_output_by_source.get(source)
 				if output_relpath is None:
-					output_relpath = build_track_output_relpath(source, content.ID)
+					artist, title = _get_content_artist_and_title(content)
+					output_relpath = build_track_output_relpath(
+						source,
+						content.ID,
+						artist,
+						title,
+					)
 					track_output_by_source[source] = output_relpath
 
 				tracks.append(
@@ -112,6 +140,7 @@ def discover_playlists(config: AppConfig) -> tuple[list[PlaylistPlan], set[str]]
 						content_id=content.ID,
 						source_path=source,
 						output_relpath=output_relpath,
+						stock_date=content.StockDate,
 					)
 				)
 

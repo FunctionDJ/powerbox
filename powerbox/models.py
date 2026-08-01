@@ -34,6 +34,7 @@ class AppConfig:
 	source_path_mappings: tuple[tuple[str, Path], ...]
 	export_root: Path
 	encoder: EncoderConfig
+	source_codecs_to_skip_reencode: tuple[str, ...]
 
 
 @dataclass
@@ -41,6 +42,7 @@ class TrackPlan:
 	content_id: str
 	source_path: Path
 	output_relpath: Path
+	stock_date: str
 
 
 @dataclass

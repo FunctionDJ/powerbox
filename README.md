@@ -7,7 +7,10 @@ Rekordbox exporter to take your library on-the-go.
 - scans `master.db` for playlists and the tracks inside them
 - supports folder remapping to run powerbox on a server or other machine where paths are different from where Rekordbox is installed
 - compresses tracks to ~192kbit/s VBR AAC (configurable), preserving album art and embedded metadata
+- skips re-encoding for configured lossy source codecs (default: AAC and MP3) to avoid recompressing already compressed files
+- sets the exported file's modification date to the track's "Date Added" from Rekordbox, so clients can sort by date added
 - writes playlist files (.m3u8) in the same folder hierarchy as Rekordbox
+- normalizes output filenames to Unicode NFC to avoid Syncthing UTF-8 path normalization conflicts
 - designed to make a portable Rekordbox playlists+music copy to sync to a mobile phone (I use [syncthing-android](https://github.com/researchxxl/syncthing-android))
 
 #### Why?
@@ -16,7 +19,7 @@ Because the official Rekordbox app is very bad and slow, syncing takes forever, 
 
 #### Clients
 
-I use Android, so I can't evaluate apps on other platforms. I have not found a player yet that will scan for playlists and show them in a hierarchy. The workaround is opening playlists from a file explorer app or using a flat view, depending on the app.
+I use Android, so I can't evaluate apps on other platforms. I have not found a player yet that will scan for playlists and show them in a hierarchy (Symfonium maybe?). The workaround is opening playlists from a file explorer app or using a flat view, depending on the app.
 
 See [docs/clients.md](docs/clients.md) for the clients I've tested and what they support.
 TL;DR Poweramp Pro comes close, but has no hierarchical view for external playlists. It was the intended target client for this project, hence the name, but now I'm looking for a better one.

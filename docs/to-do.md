@@ -1,0 +1,4 @@
+- modify each tracks cover art to render which playlists this track is contained in
+- export all tracks in library, not just those in playlists
+- check if conflict / de-dupe code is still needed
+- apply "Date Added" date to playlist/folder output items as well, not just audio files

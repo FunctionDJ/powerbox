@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
 	from pathlib import Path
 
 	from .models import AppConfig
+
+
+def set_file_mtime_from_date(path: Path, date_str: str) -> None:
+	ts = datetime.strptime(date_str, "%Y-%m-%d").timestamp()
+	os.utime(path, (ts, ts))
 
 
 def transcode_track(
@@ -61,6 +69,57 @@ def transcode_track(
 		raise RuntimeError(
 			f"ffmpeg failed for {source_path}:\n{stderr or 'No stderr output'}"
 		) from exc
+
+
+def copy_track_file(source_path: Path, output_path: Path, dry_run: bool) -> None:
+	logging.debug("Copy source audio without re-encode: %s -> %s", source_path, output_path)
+	if dry_run:
+		return
+
+	if not output_path.parent.exists():
+		logging.debug("Create folder: %s", output_path.parent)
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	shutil.copy2(source_path, output_path)
+
+
+def detect_audio_codec(source_path: Path) -> str | None:
+	command = [
+		"ffprobe",
+		"-v",
+		"error",
+		"-select_streams",
+		"a:0",
+		"-show_entries",
+		"stream=codec_name",
+		"-of",
+		"default=noprint_wrappers=1:nokey=1",
+		str(source_path),
+	]
+
+	probe_timeout_seconds = 60
+	try:
+		result = subprocess.run(
+			command,
+			check=True,
+			stdin=subprocess.DEVNULL,
+			capture_output=True,
+			text=True,
+			timeout=probe_timeout_seconds,
+		)
+	except subprocess.TimeoutExpired as exc:
+		stderr = (exc.stderr or "").strip()
+		details = f"\n{stderr}" if stderr else ""
+		raise RuntimeError(
+			f"ffprobe timed out after {probe_timeout_seconds}s for {source_path}{details}"
+		) from exc
+	except subprocess.CalledProcessError as exc:
+		stderr = (exc.stderr or "").strip()
+		raise RuntimeError(
+			f"ffprobe failed for {source_path}:\n{stderr or 'No stderr output'}"
+		) from exc
+
+	codec = result.stdout.strip().lower()
+	return codec or None
 
 
 def write_playlist_file(path: Path, lines: list[str], dry_run: bool) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,11 @@ if TYPE_CHECKING:
 
 
 def sanitize_name(name: str) -> str:
-	sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", name).strip(" .")
+	# Canonicalize Unicode to avoid filesystem/sync issues caused by equivalent UTF-8 forms.
+	normalized = unicodedata.normalize("NFC", name)
+	# Replace slash separators with comma-space before applying filesystem-safe sanitization.
+	normalized = normalized.replace("/", ", ").replace("\\", ", ")
+	sanitized = re.sub(r'[<>:"|?*\x00-\x1F]', "_", normalized).strip(" .")
 	return sanitized or "unnamed"
 
 
@@ -41,6 +46,15 @@ def map_source_path(db_path: str, source_path_mappings: Sequence[tuple[str, Path
 	return Path(normalized)
 
 
-def build_track_output_relpath(source_path: Path, content_id: str) -> Path:
-	stem = sanitize_name(source_path.stem)
-	return Path(MUSIC_SUBDIR, f"{stem}__{content_id}.m4a")
+def build_track_output_relpath(
+	source_path: Path,
+	content_id: str,
+	artist: str | None,
+	title: str | None,
+) -> Path:
+	if artist and title:
+		base = f"{sanitize_name(artist)} - {sanitize_name(title)}"
+	else:
+		base = sanitize_name(source_path.stem)
+
+	return Path(MUSIC_SUBDIR, f"{base} - {content_id}.m4a")
